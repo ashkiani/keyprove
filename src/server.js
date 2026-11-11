@@ -82,11 +82,11 @@ export function createVerifier({ resolveKey, expectedOrigin, challengeStore = cr
   if (!challengeStore || typeof challengeStore.save !== 'function' || typeof challengeStore.consume !== 'function') {
     throw new TypeError('An atomic challengeStore with save() and consume() is required');
   }
-  const originUrl = new URL(expectedOrigin);
-  if (originUrl.origin !== expectedOrigin || !/^https?:$/.test(originUrl.protocol)) {
+  const originUrl = expectedOrigin === undefined ? null : new URL(expectedOrigin);
+  if (originUrl && (originUrl.origin !== expectedOrigin || !/^https?:$/.test(originUrl.protocol))) {
     throw new Error('expectedOrigin must be a bare HTTP(S) origin');
   }
-  if (originUrl.protocol !== 'https:' && !['localhost', '127.0.0.1', '[::1]'].includes(originUrl.hostname)) {
+  if (originUrl && originUrl.protocol !== 'https:' && !['localhost', '127.0.0.1', '[::1]'].includes(originUrl.hostname)) {
     throw new Error('HTTPS required outside localhost');
   }
   if (!Number.isSafeInteger(challengeTtlMs) || challengeTtlMs < 1000 || challengeTtlMs > 300000) throw new Error('Invalid TTL');
@@ -105,8 +105,10 @@ export function createVerifier({ resolveKey, expectedOrigin, challengeStore = cr
       return { nonce, expiresInSeconds: Math.ceil(challengeTtlMs / 1000) };
     },
     async verifyRequest({ method, targetUri, headers, rawHeaders, rawBody = Buffer.alloc(0) }) {
-      const url = new URL(targetUri);
-      if (url.origin !== expectedOrigin || url.hash) fail('BAD_TARGET');
+      let url;
+      try { url = new URL(targetUri); } catch { fail('BAD_TARGET'); }
+      if (!/^https?:$/.test(url.protocol) || url.hash || (originUrl && url.origin !== expectedOrigin)) fail('BAD_TARGET');
+      if (url.protocol !== 'https:' && !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) fail('BAD_TARGET');
       if (typeof method !== 'string' || !/^[A-Z]+$/.test(method)) fail('BAD_METHOD');
       if (!(typeof rawBody === 'string' || Buffer.isBuffer(rawBody) || rawBody instanceof Uint8Array)) fail('BAD_BODY');
       const bytes = Buffer.from(rawBody);
@@ -147,11 +149,18 @@ export function createVerifier({ resolveKey, expectedOrigin, challengeStore = cr
       if (!challenge || challenge.keyId !== metadata.keyid) fail('CHALLENGE_USED');
       return { subject: record.subject, keyId: metadata.keyid, record };
     },
-    async verifyNodeRequest(req, rawBody = Buffer.alloc(0)) {
-      if (req.headers.host !== originUrl.host) fail('BAD_HOST');
-      if (req.headers.origin && req.headers.origin !== expectedOrigin) fail('BAD_ORIGIN');
+    async verifyNodeRequest(req, rawBody = Buffer.alloc(0), { targetUri } = {}) {
+      // Caller-supplied targetUri must be reconstructed from trusted routing/proxy configuration.
+      // Never use unvalidated Host / X-Forwarded-* headers to invent an absolute URI.
       if (typeof req.url !== 'string' || !req.url.startsWith('/') || req.url.startsWith('//') || req.url.includes('#')) fail('BAD_TARGET');
-      return this.verifyRequest({ method: req.method, targetUri: new URL(req.url, expectedOrigin).href,
+      if (targetUri === undefined) {
+        if (!originUrl) fail('TRUSTED_TARGET_REQUIRED');
+        if (req.headers.host !== originUrl.host) fail('BAD_HOST');
+        targetUri = new URL(req.url, expectedOrigin).href;
+      } else if (typeof targetUri !== 'string' || new URL(targetUri).pathname + new URL(targetUri).search !== req.url) {
+        fail('BAD_TARGET');
+      }
+      return this.verifyRequest({ method: req.method, targetUri,
         headers: req.headers, rawHeaders: req.rawHeaders, rawBody });
     }
   };

@@ -1,7 +1,7 @@
 {
   "name": "@ashkiani/keyprove",
-  "version": "0.1.0",
-  "description": "RFC 9421 HTTP message signing and verification with password-encrypted browser keys and one-time challenges.",
+  "version": "1.0.0",
+  "description": "RFC 9421 proof-of-possession authentication with encrypted browser keys, invitations, and framework-neutral enrollment.",
   "type": "module",
   "license": "MIT",
   "author": "Siavash Ashkiani",
@@ -10,15 +10,31 @@
     "url": "git+https://github.com/ashkiani/keyprove.git"
   },
   "homepage": "https://github.com/ashkiani/keyprove#readme",
-  "bugs": { "url": "https://github.com/ashkiani/keyprove/issues" },
-  "engines": { "node": ">=20" },
-  "sideEffects": false,
+  "bugs": {
+    "url": "https://github.com/ashkiani/keyprove/issues"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "sideEffects": [
+    "./src/ui.js",
+    "./src/ui.css"
+  ],
   "exports": {
     "./browser": "./src/browser.js",
-    "./server": "./src/server.js",
-    "./signatures": "./src/signatures.js"
+    "./server": "./src/node.js",
+    "./signatures": "./src/signatures.js",
+    "./ui": "./src/ui.js"
   },
-  "files": ["src/", "README.md", "LICENSE"],
-  "scripts": { "test": "node --test test/*.test.js", "pack:check": "npm pack --dry-run" },
+  "files": [
+    "src/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "pack:check": "npm pack --dry-run",
+    "demo": "node examples/server.js"
+  },
   "dependencies": {}
 }

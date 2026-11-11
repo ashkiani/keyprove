@@ -1,0 +1,14 @@
+:root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+body { margin: 0; padding: 1.5rem; background: Canvas; color: CanvasText; }
+.kp-shell { max-width: 34rem; margin: 2rem auto; }
+.kp-nav { margin-bottom: 1.4rem; }
+.kp-form { display: grid; gap: .9rem; }
+.kp-form label { display: grid; gap: .3rem; font-weight: 550; }
+.kp-form input, .kp-form select { box-sizing: border-box; width: 100%; padding: .6rem; border-radius: .35rem; border: 1px solid #999; font: inherit; background: Field; color: FieldText; }
+.kp-form button, .kp-actions button, [data-kp-test] { padding: .6rem .85rem; border-radius: .35rem; border: 1px solid #777; cursor: pointer; font: inherit; }
+.kp-form button { font-weight: 600; }
+.kp-actions { display: flex; flex-wrap: wrap; gap: .6rem; margin-top: 1.2rem; align-items: center; }
+.kp-actions input[type=file] { max-width: 100%; }
+.kp-status { min-height: 2rem; overflow-wrap: anywhere; }
+.kp-error { color: #c44136; }
+.kp-token { overflow-wrap: anywhere; white-space: pre-wrap; padding: .8rem; border: 1px solid #888; border-radius: .4rem; }

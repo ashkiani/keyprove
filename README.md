@@ -1,200 +1,235 @@
 # KeyProve
 
-KeyProve provides proof-of-possession authentication for HTTP requests using [RFC 9421 HTTP Message Signatures](https://www.rfc-editor.org/rfc/rfc9421.html). Clients sign each protected request with a private key; the server verifies the signature with a registered public key and rejects reused challenges. The browser module can generate credentials, encrypt private keys with a user-provided password, and store encrypted credentials in IndexedDB.
+KeyProve is a framework-independent proof-of-possession authentication library for Node.js and browsers. It uses [RFC 9421 HTTP Message Signatures](https://www.rfc-editor.org/rfc/rfc9421.html): the client signs each protected request with a private key and the server verifies it using a registered public key. Single-use challenges prevent replay of previously accepted requests.
 
-The package is **independent of any database or web framework**. Applications supply their own key lookup, enrollment policy, permission checks, and challenge storage. KeyProve does not require bearer sessions or shared API keys.
+KeyProve also supplies optional end-to-end enrollment: administrator-issued invitations, browser-generated and password-encrypted private keys, public-key registration, and minimal registration, invitation, and unlock interfaces. The host application decides which routes to expose and what authenticated users are authorized to do.
 
-> **Security status:** This is a narrowly scoped RFC 9421 implementation, not a general-purpose HTTP Message Signatures library. It has not undergone an independent security audit. Review the [security considerations](#security-considerations) before deploying it in a security-sensitive environment.
+**No database, HTTP framework, or frontend framework is required.** Persistence and HTTP communication are provided through callbacks. The package has no third-party runtime dependencies.
+
+> **Security:** KeyProve implements a constrained RFC 9421 signing profile, not every optional RFC feature. It has not undergone an independent security audit. Use HTTPS outside localhost, rate-limit public endpoints, and review the [security considerations](#security-considerations) before production use.
 
 ## Requirements
 
-- Node.js 20 or newer for server-side verification.
-- A modern browser with Web Crypto, IndexedDB, and ES module support for browser credential management.
-- HTTPS in deployed applications (localhost HTTP is suitable for local development).
-- No third-party runtime dependencies.
+- Node.js 20 or newer on the server.
+- Modern browsers with Web Crypto, IndexedDB, and ES modules for browser credentials and optional UI.
+- A trustworthy browser origin and HTTPS for deployment. Localhost HTTP is suitable for local development.
 
-## Installation
+## Install
 
 ```sh
 npm install @ashkiani/keyprove
 ```
 
-Node.js imports:
-
 ```js
-import { createVerifier, createMemoryChallengeStore } from '@ashkiani/keyprove/server';
+import { createKeyprove, createMemoryStorage } from '@ashkiani/keyprove/server';
 ```
 
-For browser code compiled with a bundler:
+The browser module is available as `@ashkiani/keyprove/browser`, and the optional browser UI as `@ashkiani/keyprove/ui`. They can be bundled or served on the application's origin as described below.
+
+## Complete flow
+
+1. **Invitation:** An administrator authorizes an email address. KeyProve generates a random invitation token, stores **only its SHA-256 hash** through the host's storage callback, and returns the plaintext token once for the administrator to deliver.
+2. **Enrollment:** The user enters the email and token. KeyProve checks the saved invitation and issues a short-lived enrollment token and challenge.
+3. **Browser keys:** KeyProve's browser code creates an ECDSA P-256 key pair, encrypts the private key with a password-derived AES-256-GCM key, and signs the enrollment data. The private key and password are not sent to the server.
+4. **Registration:** KeyProve verifies the proof, atomically consumes the invitation and enrollment token, and saves the registered public key through a callback.
+5. **Unlock:** The browser unlocks its encrypted private key into a non-extractable Web Crypto `CryptoKey` in memory.
+6. **Protected request:** The browser requests a one-time challenge and signs the actual HTTP request. KeyProve verifies the signature and atomically consumes the challenge; the host application then applies its authorization policy.
+
+The encrypted credential can be exported and imported on another browser or device. Deleting a local credential does **not** revoke its registered public key on the server.
+
+## Server configuration
 
 ```js
-import { generateCredential, unlockCredential, signedFetch } from '@ashkiani/keyprove/browser';
-```
-
-For **vanilla JavaScript without a bundler**, serve `src/browser.js` and `src/signatures.js` from the installed package under the same directory on your application's own origin, then import the browser module using your site's URL (for example, `/vendor/keyprove/browser.js`). Do not serve the entire `node_modules` directory publicly.
-
-## Authentication flow
-
-1. **Enrollment:** Your application authorizes the user or device. The browser generates an ECDSA P-256 key pair, encrypts the private key with a password, and provides the public key for registration. Your server verifies the enrollment proof and stores the key and account association.
-2. **Unlock:** The browser decrypts the local credential using the password and imports a non-extractable signing key. Neither the password nor the private key is sent to the server.
-3. **Challenge:** Before a protected request, the client asks the server for a fresh challenge associated with its registered key ID.
-4. **Request signing:** The client signs the request's method, target URI, required content fields, and RFC 9421 signature parameters, including the challenge.
-5. **Verification:** The server resolves the public key, validates the signature and request body, and atomically consumes the one-time challenge. Your application then decides whether the authenticated identity is authorized to perform the operation.
-
-## Server usage
-
-```js
-import {
-  createVerifier,
-  createMemoryChallengeStore
-} from '@ashkiani/keyprove/server';
-
-// Example storage adapter. Replace with your application's registered-key store.
-const registeredKeys = new Map();
-// Each record must contain at least:
-// { publicKey: <P-256 public JWK>, subject: <application user ID> }
-
-const verifier = createVerifier({
-  expectedOrigin: 'https://example.com',
-  resolveKey: async keyId => registeredKeys.get(keyId) ?? null,
-  challengeStore: createMemoryChallengeStore()
+const keyprove = createKeyprove({
+  adminToken: process.env.KEYPROVE_ADMIN_TOKEN,
+  // expectedOrigin: 'https://api.example.com', // optional
+  storage: {
+    async save(type, id, record) { /* insert record; reject duplicate ID */ },
+    async get(type, id) { /* return record or null */ },
+    async consume(type, id) { /* atomically return-and-delete, or null */ }
+  }
 });
 ```
 
-Connect the verifier to your own HTTP routes:
+The storage callbacks are **application-supplied**, so they can use MongoDB, SQL, files, or another system. KeyProve defines its records and controls expiration and single use. Supported record types are `invitation`, `enrollment`, `publicKey`, and `challenge`.
+
+| Callback | Required behavior |
+|---|---|
+| `save(type, id, record)` | **Create-only:** do not overwrite existing records with the same `(type, id)`. Reject duplicates. |
+| `get(type, id)` | Return the stored record or `null`, without mutating it. |
+| `consume(type, id)` | **Atomically** remove and return the record once, or return `null`. This must be atomic across all server processes sharing the same storage. |
+
+KeyProve stores a hash of the plaintext invitation token. Your database does not need to store recoverable invitation codes. The administrator must copy or deliver the code when issued. Record expiry is enforced by KeyProve even if the storage layer has no TTL mechanism.
+
+`createMemoryStorage()` is included for single-process demonstrations and testing. It loses registrations on restart and must **not** be used as a persistent or multi-instance authentication store.
+
+### Operations
 
 ```js
-// Unauthenticated challenge endpoint: receive { keyId } from the client.
-const challenge = await verifier.issueChallenge(keyId);
-// Respond with JSON: { nonce, expiresInSeconds }.
-
-// Protected endpoint: supply the original raw HTTP request body bytes.
-const identity = await verifier.verifyNodeRequest(req, rawBody);
-// identity.subject and identity.keyId were authenticated.
-// Your application must still enforce authorization before performing the operation.
-```
-
-The code above illustrates the integration points; it is **not a complete HTTP server**. The caller must implement routing, registration, authorization, request-body capture, error handling, and rate limits. `rawBody` must contain the exact received body bytes; serializing an already parsed JSON object is not equivalent.
-
-### Public key registration
-
-KeyProve does not decide whether someone may register. Once your application has independently verified enrollment authorization, use:
-
-```js
-import {
-  keyIdFromPublicKey,
-  verifyEnrollmentProof
-} from '@ashkiani/keyprove/server';
-
-// Verify the signed proof along with your OWN invitation or enrollment checks.
-const valid = verifyEnrollmentProof({
-  email, origin: 'https://example.com', token, challenge, publicKey, signature
-});
-
-if (valid) {
-  const keyId = keyIdFromPublicKey(publicKey);
-  // Atomically consume the authorized, short-lived enrollment token/challenge.
-  // Store { keyId, publicKey, subject } in your application's trusted key store.
-}
-```
-
-`verifyEnrollmentProof()` checks possession of the matching private key, **not** ownership of the email address or permission to enroll. Your application must independently bind and validate the enrollment token, challenge, and identity and ensure they cannot be reused. The enrollment proof is application-specific, not part of RFC 9421.
-
-### Challenge store
-
-The default `createMemoryChallengeStore()` is suitable only for a **single Node.js process**. For a clustered or multi-instance deployment, provide a shared store with atomic consumption:
-
-```js
-{
-  async save(nonce, { keyId, expiresAt }) { /* persist challenge */ },
-  async consume(nonce) { /* return once, then delete atomically; otherwise null */ }
-}
-```
-
-An ordinary read followed by delete is **not sufficient** across concurrent processes. The verifier also checks expiry and key association. Rate-limit challenge issuance and enrollment endpoints in the host application.
-
-## Browser usage
-
-The examples below use an import path for files served from your own website; adapt the URL to match your deployment.
-
-```js
-import {
-  generateCredential,
-  saveCredential,
-  getCredential,
-  unlockCredential,
-  signEnrollment,
-  signedFetch
-} from '/vendor/keyprove/browser.js';
-
-// After the application authorizes enrollment:
-const { bundle, publicKey, privateKey } = await generateCredential({
+// Must be called only after the host authorizes an admin request.
+const invitation = await keyprove.issueRegistrationToken({
   email: 'alice@example.com',
-  password: userSuppliedPassword
+  adminToken: process.env.KEYPROVE_ADMIN_TOKEN
 });
-await saveCredential(bundle); // Persists encrypted credential data in IndexedDB.
+// { email, token, expiresAt } — show the token to the administrator only.
 
-// Obtain { token, challenge } from your application's enrollment endpoint.
-// Send the publicKey and this signature to its enrollment-completion endpoint.
-const signature = await signEnrollment({
-  email: bundle.email,
-  origin: location.origin,
-  token,
-  challenge,
-  publicKey,
-  privateKey
+const start = await keyprove.startRegistration({
+  email, invitationToken, origin: 'https://api.example.com'
 });
+// { token, challenge, origin, expiresInSeconds }
 
-// On a later visit, unlock the locally stored encrypted credential:
-const stored = await getCredential('alice@example.com');
-const unlockedKey = await unlockCredential(stored, userSuppliedPassword);
+const registration = await keyprove.finishRegistration({
+  email, token: start.token, challenge: start.challenge, publicKey, signature
+});
+// { email, keyId }; KeyProve calls storage.save('publicKey', keyId, record).
 
-// Signed request: automatically obtains and signs a single-use challenge.
-const response = await signedFetch({
-  url: `${location.origin}/api/private/me`,
-  challengeUrl: `${location.origin}/api/challenge`,
-  method: 'GET',
-  privateKey: unlockedKey,
-  publicKey: stored.publicKey
+const challenge = await keyprove.issueChallenge(keyId);
+const identity = await keyprove.verifyRequest({
+  method, targetUri, headers, rawHeaders, rawBody
+});
+// identity.subject, identity.keyId, identity.record
+```
+
+The registration signature is created by `signEnrollment()` in the browser. Applications should never use the invitation code as an authentication credential for protected requests.
+
+### No hardcoded routes or response format dependencies
+
+The host can invoke KeyProve operations directly or use `handle()`, which accepts generic request and response callbacks:
+
+```js
+// Your application's route handler determines when this is called.
+await keyprove.handle('registration-start', {
+  readRequest: async () => ({
+    method: req.method,
+    headers: req.headers,
+    body: req.body,                        // Parsed JSON or JSON text
+    origin: 'https://api.example.com'      // Trusted backend origin
+  }),
+  sendResponse: ({ status, headers, body }) => {
+    res.status(status).set(headers).send(body);  // Express example only
+  }
 });
 ```
 
-`signEnrollment()` **does not send** the enrollment request. Your application sends the returned signature, public key, and required enrollment fields to its own backend. To sign a request manually, use `signRequest({ url, method, body, nonce, privateKey, publicKey })`, then transmit the exact returned body and headers without modification.
+Supported `handle()` actions are `admin-invite`, `registration-start`, `registration-finish`, `challenge`, `registration-page`, `login-page`, `admin-page`, and `asset`. The administrator invitation action expects `Authorization: Bearer <admin token>`; the token must be provided by the host from an appropriate secret source such as an environment variable. Do not accept an admin token in a URL query string.
 
-For encrypted credential backup and recovery, use `validateCredential()`, `listCredentials()`, and `deleteCredential()` along with JSON export/import of the encrypted credential bundle. The backup format is compatible with version-1 KeyProve Lab backups; it does **not** automatically migrate IndexedDB entries between different browser origins.
+`handle()` returns `{ status, headers, body }` if no `sendResponse` callback is supplied. It neither defines routes nor creates an HTTP server. For a runnable example using only Node.js built-ins, see [examples/server.js](examples/server.js).
 
-## Supported signing profile
+### Per-request verification without a fixed expected origin
 
-KeyProve implements a deliberately constrained request-signing profile:
+`expectedOrigin` is optional. KeyProve **always** requires the RFC 9421 signature to cover `@method` and `@target-uri` and always enforces one-time challenges. If configured, `expectedOrigin` additionally restricts signed requests to that backend origin.
 
-- [RFC 9421](https://www.rfc-editor.org/rfc/rfc9421.html): `Signature-Input` and `Signature` HTTP fields; signature label `sig1`; `ecdsa-p256-sha256`.
-- Covered components: `@method` and `@target-uri`, with `content-type` and signed [RFC 9530](https://www.rfc-editor.org/rfc/rfc9530.html) `content-digest` for methods other than GET and HEAD (including empty bodies).
-- Signed signature parameters: `created`, `nonce`, `keyid`, `alg`, and `tag=keyprove-v1`.
-- [RFC 7638](https://www.rfc-editor.org/rfc/rfc7638.html): JWK thumbprints for public-key IDs.
-- Cryptographically random 32-byte challenges, 60-second default lifetime, and mandatory one-time use.
-- Password-protected browser credential backups using PBKDF2-HMAC-SHA256 (600,000 iterations by default) and AES-256-GCM. Unlocked signing keys are imported as non-extractable Web Crypto keys.
+When omitted, the application must provide the **trusted absolute target URI**:
 
-Other conformant RFC 9421 signatures may be rejected if they fall outside this application's required profile. The library does not provide arbitrary-algorithm verification, response signatures, or a general-purpose HTTP Structured Fields parser.
+```js
+const identity = await keyprove.verifyNodeRequest(req, rawBody, {
+  targetUri: `https://api.example.com${req.url}` // Based on trusted server configuration
+});
+```
+
+Do not construct that URI by blindly trusting `Host`, `Origin`, `Forwarded`, or `X-Forwarded-*` headers. `rawBody` must be the **exact received bytes**. KeyProve does not decide whether a route requires authentication, and it does not enforce application-specific user permissions.
+
+## Ready-to-use pages and browser code
+
+Optional pages include:
+
+- **Invitation page:** Administrator enters their authorization token and the email address; the newly issued invitation is displayed once.
+- **Registration page:** User enters email, invitation, and a password. Browser generates and encrypts keys; server verifies enrollment and stores the public key.
+- **Unlock page:** User selects a credential stored in IndexedDB and enters its password. Local encrypted key export, import, and deletion are also available.
+
+The host chooses the routes. To serve a registration page through the response callback:
+
+```js
+await keyprove.handle('registration-page', {
+  pageOptions: {
+    assetsBase: '/auth/assets',
+    registrationStart: '/auth/register/start',
+    registrationFinish: '/auth/register/finish'
+  },
+  sendResponse: ({ status, headers, body }) => res.status(status).set(headers).send(body)
+});
+```
+
+Serve the JavaScript and stylesheet through the same callback interface:
+
+```js
+await keyprove.handle('asset', {
+  asset: 'ui.js', // Also browser.js, signatures.js, ui.css
+  sendResponse: ({ status, headers, body }) => res.status(status).set(headers).send(body)
+});
+```
+
+The HTML page imports `ui.js`, which imports `browser.js` and `signatures.js`. Serve all these assets at the configured `assetsBase` **on the same origin as the page**. Do not expose all of `node_modules` as a web-accessible directory.
+
+### Embed the UI in an existing frontend
+
+The optional browser UI is also available as plain ES modules (no React or bundler required):
+
+```js
+import { mountLogin, mountRegistration } from '/auth/assets/ui.js';
+
+mountLogin({
+  container: document.getElementById('login'),
+  onUnlock: ({ email, privateKey, publicKey }) => {
+    // Keep privateKey in page memory and pass it to signedFetch().
+  },
+  onLock: () => {
+    // Clear the host application's reference to the unlocked key.
+  }
+});
+
+mountRegistration({
+  container: document.getElementById('register'),
+  startUrl: '/auth/register/start',
+  finishUrl: '/auth/register/finish'
+});
+```
+
+`mountAdmin()` is also available. For custom interfaces, import `generateCredential()`, `unlockCredential()`, `saveCredential()`, `signEnrollment()`, and `signedFetch()` from `@ashkiani/keyprove/browser` instead.
+
+The browser generates the key pair; **the Node server never receives the plaintext private key or the unlock password**. The optional unlock page keeps its key available in that page's memory. For an existing single-page frontend, use the embedded `onUnlock` callback so the host app can use the key for future signed requests without navigating away. Encrypted IndexedDB storage is origin-specific.
+
+## Runnable local example
+
+The repository includes a small HTTP application under `examples/server.js` that uses the public package API and in-memory storage for testing:
+
+```sh
+npm run demo
+```
+
+Visit `http://localhost:3130/auth/admin`, enter the administrator token printed in the terminal, issue an invitation, then open `/auth/register` to register and `/auth/login` to unlock and test a signed request. Restarting this example clears all registrations.
+
+Run automated tests with `npm test`.
+
+## Existing lower-level API
+
+The v0.1.0 API remains exported:
+
+- `@ashkiani/keyprove/server`: `createVerifier()`, `createMemoryChallengeStore()`, `verifyEnrollmentProof()`, `keyIdFromPublicKey()` and `KeyproveError`.
+- `@ashkiani/keyprove/browser`: `generateCredential()`, `unlockCredential()`, `saveCredential()`, `getCredential()`, `listCredentials()`, `deleteCredential()`, `validateCredential()`, `signEnrollment()`, `signRequest()`, `signedFetch()`, `keyIdFromPublicKey()`.
+- `@ashkiani/keyprove/signatures`: the existing RFC 9421 signature helpers.
+
+The original encrypted credential backup format and existing RFC 9421 signing profile are unchanged.
 
 ## Security considerations
 
-- **Authentication is not authorization.** Applications must independently manage registration eligibility, accounts, permissions, revocation, and recovery.
-- **TLS is still required.** HTTP signatures do not protect against malicious scripts served by a compromised origin, or active interception of unprotected web traffic.
-- **Non-extractable does not mean inaccessible.** Malicious JavaScript on the same origin can use an unlocked key to sign requests. A compromised device or browser remains a serious threat.
-- **Encrypted credential backups can be attacked offline.** Their security depends on the password and its key derivation settings. Use strong, unique passwords.
-- **Replay resistance depends on atomic challenge consumption.** Use shared, atomic challenge storage when multiple server instances are involved.
-- **The deployment's externally visible origin matters.** Configure trusted host/proxy behavior carefully; do not blindly trust attacker-supplied forwarding headers.
-- **Every protected request requires an extra challenge round trip.** Applications must plan for that latency and appropriately handle timeouts and errors.
-- **This implementation is not independently audited.** Its RFC 9421 support is limited to the documented signing and verification profile.
+- **Invitation authentication:** Admin-token checks do not replace network protections and rate limiting. Use a long randomly generated admin token from a protected server-side secret, transmit it over HTTPS, and do not expose it to non-admin users. Protect administrative and registration endpoints against abuse.
+- **Enrollment is not email ownership verification:** Possession of an invitation token authorizes enrollment for the associated email; KeyProve does not deliver an email or verify that its recipient owns that mailbox. Choose a trusted delivery method.
+- **Persistent atomic operations:** `consume()` must be atomic across instances. `save()` must enforce uniqueness; database outages or failures between consuming an invitation and storing a key can require the administrator to issue another invitation. Multi-record transactions are not provided by this generic callback interface.
+- **Password-protected browser keys:** Encrypted credential backups are vulnerable to offline password guessing if passwords are weak. `extractable: false` prevents ordinary Web Crypto export but does not stop malicious same-origin code from using an unlocked key.
+- **HTTPS and JavaScript integrity:** Use HTTPS in deployed environments. Signed requests do not protect against compromised frontend JavaScript, a compromised server, or an attacker controlling the user's device.
+- **Signed target integrity:** Preserve the exact request content bytes and supply a trusted absolute target URI when `expectedOrigin` is omitted. Do not confuse the backend's intended destination with browser `Origin`/CORS policy.
+- **Replay and concurrency:** One challenge per protected request; a valid signature is verified before consuming its nonce. External storage must enforce atomic consumption.
+- **Authorization and revocation:** Successful cryptographic authentication does not imply permission to perform an operation. The host application decides access policy and how keys are revoked. Local deletion does not revoke server-side keys.
+- **Deployment:** The packaged pages are optional and minimal. Applications are responsible for secure hosting, CSRF considerations for any cookie-authenticated administrative features, input/body limits, rate limiting, monitoring, and origin policy.
 
-## Development tests
+## Standards
 
-```sh
-npm test
-npm pack --dry-run
-```
+- [RFC 9421](https://www.rfc-editor.org/rfc/rfc9421.html): HTTP Message Signatures. KeyProve supports one `sig1` request signature with ECDSA P-256/SHA-256 and mandatory metadata (`created`, `nonce`, `keyid`, `alg`, `tag`).
+- [RFC 9530](https://www.rfc-editor.org/rfc/rfc9530.html): signed `Content-Digest` for request bodies.
+- [RFC 7638](https://www.rfc-editor.org/rfc/rfc7638.html): JWK thumbprints used for key IDs.
 
-The automated tests cover credential encryption/unlocking, key compatibility, the published RFC 9421 ECDSA test vector, signed requests, replay rejection, and tampering detection.
+KeyProve enforces a stricter request-signing profile than the general-purpose RFC, and does not implement all possible algorithms, HTTP components, or response signatures. It is not an independently audited authentication product.
 
 ## License
 
