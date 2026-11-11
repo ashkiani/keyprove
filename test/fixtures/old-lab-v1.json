@@ -1,0 +1,19 @@
+{
+  "type": "browser-key-auth-backup",
+  "version": 1,
+  "email": "legacy@example.com",
+  "publicKey": {
+    "kty": "EC",
+    "crv": "P-256",
+    "x": "36QFZHGuNc4OTJeDE3aY88ac3eNriMSFqvDdZ5hQtPg",
+    "y": "9U0l4qY0UJPXAOJVslxOddCQ8J8saDgG-fHIIqKeCi0"
+  },
+  "encryption": {
+    "kdf": "PBKDF2-SHA256",
+    "iterations": 600000,
+    "salt": "9rHsnxvDSOOVMM0iJUEWeQ",
+    "cipher": "AES-256-GCM",
+    "iv": "NOMbZWtcU3vwalVx",
+    "wrappedPrivateKey": "oNjE7WTOsxIEFCQy2bu94AVDQnN1SRZk_KQQUtcXISHZq1S5HBoKGzRNppAWQRMVZrSe1GfuXILWGrpSDcOvbna0SBz2TNHr4SjLNnRlB_S1drrCqxmv0RR2ZiCxH1GPUZCp301m2o3sU2Mpp9O6a8qI7mgED2eKEisYuXBr_NaeDXHVGJpQrilb0vVnFHNFhwK5heBStXFRYA"
+  }
+}

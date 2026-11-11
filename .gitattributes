@@ -1,0 +1,4 @@
+# Repository source files use LF. This does not change tracked content by itself.
+*.js text eol=lf
+*.json text eol=lf
+*.md text eol=lf
